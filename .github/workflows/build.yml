@@ -1,3 +1,4 @@
+```yaml
 name: CI
 
 on:
@@ -6,7 +7,6 @@ on:
       - master
   workflow_dispatch:
 
-# GITHUB_TOKEN должен иметь право создавать Release
 permissions:
   contents: write
 
@@ -15,19 +15,11 @@ jobs:
     runs-on: macos-15
 
     steps:
-      # ==========================================
-      # CHECKOUT
-      # ==========================================
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
-
-      # ==========================================
-      # SUBMODULES
-      # ==========================================
 
       - name: Fix submodule URLs
         run: |
@@ -41,10 +33,6 @@ jobs:
 
           git submodule sync
           git submodule update --init --recursive
-
-      # ==========================================
-      # XCODE
-      # ==========================================
 
       - name: Set active Xcode path
         run: |
@@ -68,10 +56,6 @@ jobs:
           echo "Active Xcode:"
           xcodebuild -version
 
-      # ==========================================
-      # CANONICAL SOURCE DIRECTORY
-      # ==========================================
-
       - name: Create canonical source directory
         run: |
           set -e
@@ -82,12 +66,8 @@ jobs:
           sudo rm -rf "$SOURCE_DIR"
           sudo cp -R "$GITHUB_WORKSPACE" "$SOURCE_DIR"
 
-          # Очень важно:
-          # Make.py должен иметь право создавать build-input,
-          # Bazel и другие каталоги внутри SOURCE_DIR.
           sudo chown -R "$(whoami)":staff "$SOURCE_DIR"
 
-          # Проверяем права
           echo "Source directory:"
           ls -ld "$SOURCE_DIR"
 
@@ -99,10 +79,6 @@ jobs:
           touch "$TEST_FILE"
           rm -f "$TEST_FILE"
 
-      # ==========================================
-      # BUILD
-      # ==========================================
-
       - name: Build the App
         run: |
           set -e
@@ -113,42 +89,27 @@ jobs:
 
           cd "$SOURCE_DIR"
 
-          # ------------------------------------------
-          # Version / build number
-          # ------------------------------------------
-
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
 
           APP_VERSION="$(
-            python3 -c \
-            'import json; print(json.load(open("versions.json"))["app"])'
+            python3 -c 'import json; print(json.load(open("versions.json"))["app"])'
           )"
 
           COMMIT_COUNT="$(git rev-list --count HEAD)"
 
-          BUILD_NUMBER="$(
-            (
-              COMMIT_COUNT + BUILD_NUMBER_OFFSET
-            )
-          )"
+          BUILD_NUMBER=$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))
 
           echo "APP_VERSION=$APP_VERSION"
+          echo "COMMIT_COUNT=$COMMIT_COUNT"
+          echo "BUILD_NUMBER_OFFSET=$BUILD_NUMBER_OFFSET"
           echo "BUILD_NUMBER=$BUILD_NUMBER"
 
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
-          # ------------------------------------------
-          # Fake code signing
-          # ------------------------------------------
-
           python3 \
             build-system/Make/ImportCertificates.py \
             --path build-system/fake-codesigning/certs
-
-          # ------------------------------------------
-          # Telegram build
-          # ------------------------------------------
 
           python3 -u \
             build-system/Make/Make.py \
@@ -164,14 +125,9 @@ jobs:
           echo "BAZEL BUILD FINISHED"
           echo "=========================================="
 
-          # ------------------------------------------
-          # Check IPA
-          # ------------------------------------------
-
           IPA_SOURCE="bazel-bin/Telegram/Telegram.ipa"
 
           if [ ! -f "$IPA_SOURCE" ]; then
-            echo ""
             echo "ERROR: Telegram.ipa was not created."
             echo ""
             echo "Searching for IPA files:"
@@ -182,26 +138,14 @@ jobs:
           echo "IPA found:"
           ls -lh "$IPA_SOURCE"
 
-          # ------------------------------------------
-          # Prepare artifacts
-          # ------------------------------------------
-
           OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
 
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
 
-          # ------------------------------------------
-          # Copy IPA
-          # ------------------------------------------
-
           cp \
             "$IPA_SOURCE" \
             "$OUTPUT_PATH/Telegram.ipa"
-
-          # ------------------------------------------
-          # Find and collect dSYMs
-          # ------------------------------------------
 
           rm -rf "$SOURCE_DIR/build/DSYMs"
           mkdir -p "$SOURCE_DIR/build/DSYMs"
@@ -223,23 +167,15 @@ jobs:
           echo "Found dSYM bundles: $DSYM_COUNT"
 
           if [ "$DSYM_COUNT" -gt 0 ]; then
-
             zip -r \
               "$OUTPUT_PATH/Telegram.DSYMs.zip" \
               "$SOURCE_DIR/build/DSYMs"
 
             echo "DSYM_CREATED=true" >> "$GITHUB_ENV"
-
           else
-
             echo "No dSYM bundles found."
             echo "DSYM_CREATED=false" >> "$GITHUB_ENV"
-
           fi
-
-          # ------------------------------------------
-          # Final artifact check
-          # ------------------------------------------
 
           echo ""
           echo "=========================================="
@@ -253,12 +189,7 @@ jobs:
             exit 1
           fi
 
-          echo ""
           echo "IPA is ready."
-
-      # ==========================================
-      # RELEASE
-      # ==========================================
 
       - name: Create GitHub Release
         env:
@@ -271,34 +202,27 @@ jobs:
 
           TAG="build-${BUILD_NUMBER}"
 
-          echo "Creating release:"
-          echo "$TAG"
+          echo "Creating release: $TAG"
 
-          # Если такой tag/release уже существует,
-          # workflow не будет молча перезаписывать его.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "ERROR: Release $TAG already exists."
             exit 1
           fi
 
-          RELEASE_ARGS=(
-            "$TAG"
-            "$OUTPUT_PATH/Telegram.ipa"
-            --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})"
-            --notes "Custom Telegram iOS build with camera improvements."
-          )
-
           if [ "$DSYM_CREATED" = "true" ]; then
-            RELEASE_ARGS+=(
-              "$OUTPUT_PATH/Telegram.DSYMs.zip"
-            )
+            gh release create \
+              "$TAG" \
+              "$OUTPUT_PATH/Telegram.ipa" \
+              "$OUTPUT_PATH/Telegram.DSYMs.zip" \
+              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
+              --notes "Custom Telegram iOS build with camera improvements."
+          else
+            gh release create \
+              "$TAG" \
+              "$OUTPUT_PATH/Telegram.ipa" \
+              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
+              --notes "Custom Telegram iOS build with camera improvements."
           fi
-
-          gh release create "${RELEASE_ARGS[@]}"
-
-      # ==========================================
-      # RESULT
-      # ==========================================
 
       - name: Show result
         run: |
@@ -310,8 +234,6 @@ jobs:
           echo "Telegram version: $APP_VERSION"
           echo "Build number:     $BUILD_NUMBER"
           echo ""
-          echo "Release:"
-          echo "https://github.com/${{ github.repository }}/releases/tag/build-${BUILD_NUMBER}"
-          echo ""
           echo "Artifacts:"
           ls -lh /Users/Shared/telegram-ios/build/artifacts/
+```
