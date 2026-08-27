@@ -4,9 +4,9 @@ on:
   push:
     branches:
       - master
-
   workflow_dispatch:
 
+# GITHUB_TOKEN должен иметь право создавать Release
 permissions:
   contents: write
 
@@ -15,39 +15,93 @@ jobs:
     runs-on: macos-15
 
     steps:
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
 
+      # ==========================================
+      # SUBMODULES
+      # ==========================================
+
       - name: Fix submodule URLs
         run: |
           set -e
 
-          git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
-          git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+          git config submodule.submodules/TgVoipWebrtc/tgcalls.url \
+            https://github.com/TelegramMessenger/tgcalls.git
+
+          git config submodule.submodules/rlottie/rlottie.url \
+            https://github.com/TelegramMessenger/rlottie.git
 
           git submodule sync
           git submodule update --init --recursive
+
+      # ==========================================
+      # XCODE
+      # ==========================================
 
       - name: Set active Xcode path
         run: |
           set -e
 
-          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
+          XCODE_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')"
 
-          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          echo "Required Xcode: $XCODE_VERSION"
 
+          XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "ERROR: Xcode $XCODE_VERSION is not installed on this runner."
+            echo "Available Xcode installations:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
+          fi
+
+          sudo xcode-select -s "$XCODE_PATH"
+
+          echo "Active Xcode:"
           xcodebuild -version
+
+      # ==========================================
+      # CANONICAL SOURCE DIRECTORY
+      # ==========================================
 
       - name: Create canonical source directory
         run: |
           set -e
 
+          SOURCE_DIR="/Users/Shared/telegram-ios"
+
           sudo mkdir -p /Users/Shared
-          sudo rm -rf /Users/Shared/telegram-ios
-          sudo cp -R "$GITHUB_WORKSPACE" /Users/Shared/telegram-ios
+          sudo rm -rf "$SOURCE_DIR"
+          sudo cp -R "$GITHUB_WORKSPACE" "$SOURCE_DIR"
+
+          # Очень важно:
+          # Make.py должен иметь право создавать build-input,
+          # Bazel и другие каталоги внутри SOURCE_DIR.
+          sudo chown -R "$(whoami)":staff "$SOURCE_DIR"
+
+          # Проверяем права
+          echo "Source directory:"
+          ls -ld "$SOURCE_DIR"
+
+          echo "Current user:"
+          whoami
+
+          echo "Write test:"
+          TEST_FILE="$SOURCE_DIR/.github_actions_write_test"
+          touch "$TEST_FILE"
+          rm -f "$TEST_FILE"
+
+      # ==========================================
+      # BUILD
+      # ==========================================
 
       - name: Build the App
         run: |
@@ -59,85 +113,152 @@ jobs:
 
           cd "$SOURCE_DIR"
 
+          # ------------------------------------------
+          # Version / build number
+          # ------------------------------------------
+
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
 
-          APP_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')"
+          APP_VERSION="$(
+            python3 -c \
+            'import json; print(json.load(open("versions.json"))["app"])'
+          )"
 
           COMMIT_COUNT="$(git rev-list --count HEAD)"
-          BUILD_NUMBER="$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))"
 
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          BUILD_NUMBER="$(
+            (
+              COMMIT_COUNT + BUILD_NUMBER_OFFSET
+            )
+          )"
+
+          echo "APP_VERSION=$APP_VERSION"
+          echo "BUILD_NUMBER=$BUILD_NUMBER"
+
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
-          python3 build-system/Make/ImportCertificates.py \
+          # ------------------------------------------
+          # Fake code signing
+          # ------------------------------------------
+
+          python3 \
+            build-system/Make/ImportCertificates.py \
             --path build-system/fake-codesigning/certs
 
-          python3 -u build-system/Make/Make.py \
+          # ------------------------------------------
+          # Telegram build
+          # ------------------------------------------
+
+          python3 -u \
+            build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             build \
             --configurationPath="build-system/appstore-configuration.json" \
-            --codesigningInformationPath=build-system/fake-codesigning \
+            --codesigningInformationPath="build-system/fake-codesigning" \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
-          # ==============================
-          # Check IPA
-          # ==============================
+          echo ""
+          echo "=========================================="
+          echo "BAZEL BUILD FINISHED"
+          echo "=========================================="
 
-          if [ ! -f "bazel-bin/Telegram/Telegram.ipa" ]; then
+          # ------------------------------------------
+          # Check IPA
+          # ------------------------------------------
+
+          IPA_SOURCE="bazel-bin/Telegram/Telegram.ipa"
+
+          if [ ! -f "$IPA_SOURCE" ]; then
+            echo ""
             echo "ERROR: Telegram.ipa was not created."
+            echo ""
+            echo "Searching for IPA files:"
+            find bazel-bin -type f -name "*.ipa" -print 2>/dev/null || true
             exit 1
           fi
 
-          # ==============================
-          # Collect IPA
-          # ==============================
+          echo "IPA found:"
+          ls -lh "$IPA_SOURCE"
 
-          OUTPUT_PATH="build/artifacts"
+          # ------------------------------------------
+          # Prepare artifacts
+          # ------------------------------------------
+
+          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
 
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
 
+          # ------------------------------------------
+          # Copy IPA
+          # ------------------------------------------
+
           cp \
-            "bazel-bin/Telegram/Telegram.ipa" \
+            "$IPA_SOURCE" \
             "$OUTPUT_PATH/Telegram.ipa"
 
-          # ==============================
-          # Collect dSYMs
-          # ==============================
+          # ------------------------------------------
+          # Find and collect dSYMs
+          # ------------------------------------------
 
-          rm -rf build/DSYMs
-          mkdir -p build/DSYMs
+          rm -rf "$SOURCE_DIR/build/DSYMs"
+          mkdir -p "$SOURCE_DIR/build/DSYMs"
 
-          find "bazel-bin/Telegram" \
+          find "$SOURCE_DIR/bazel-bin/Telegram" \
             -type d \
             -name "*.dSYM" \
-            -exec cp -R {} build/DSYMs/ \;
+            -print \
+            -exec cp -R {} "$SOURCE_DIR/build/DSYMs/" \;
 
-          DSYM_COUNT=$(find build/DSYMs -type d -name "*.dSYM" | wc -l | tr -d ' ')
+          DSYM_COUNT="$(
+            find "$SOURCE_DIR/build/DSYMs" \
+              -type d \
+              -name "*.dSYM" \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          echo "Found dSYM bundles: $DSYM_COUNT"
 
           if [ "$DSYM_COUNT" -gt 0 ]; then
-            echo "Found $DSYM_COUNT dSYM bundle(s)."
 
             zip -r \
               "$OUTPUT_PATH/Telegram.DSYMs.zip" \
-              build/DSYMs
+              "$SOURCE_DIR/build/DSYMs"
 
             echo "DSYM_CREATED=true" >> "$GITHUB_ENV"
+
           else
-            echo "No dSYM files found."
+
+            echo "No dSYM bundles found."
             echo "DSYM_CREATED=false" >> "$GITHUB_ENV"
+
           fi
 
-          # ==============================
-          # Verify artifacts
-          # ==============================
+          # ------------------------------------------
+          # Final artifact check
+          # ------------------------------------------
 
-          echo "================================"
-          echo "BUILD ARTIFACTS"
-          echo "================================"
+          echo ""
+          echo "=========================================="
+          echo "FINAL ARTIFACTS"
+          echo "=========================================="
 
-          ls -lh "$OUTPUT_PATH"
+          ls -lah "$OUTPUT_PATH"
+
+          if [ ! -f "$OUTPUT_PATH/Telegram.ipa" ]; then
+            echo "ERROR: Final Telegram.ipa is missing."
+            exit 1
+          fi
+
+          echo ""
+          echo "IPA is ready."
+
+      # ==========================================
+      # RELEASE
+      # ==========================================
 
       - name: Create GitHub Release
         env:
@@ -145,33 +266,52 @@ jobs:
         run: |
           set -e
 
-          if [ "$DSYM_CREATED" = "true" ]; then
+          SOURCE_DIR="/Users/Shared/telegram-ios"
+          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
 
-            gh release create \
-              "build-${BUILD_NUMBER}" \
-              "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa" \
-              "/Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip" \
-              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
-              --notes "Custom Telegram iOS build with camera improvements."
+          TAG="build-${BUILD_NUMBER}"
 
-          else
+          echo "Creating release:"
+          echo "$TAG"
 
-            gh release create \
-              "build-${BUILD_NUMBER}" \
-              "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa" \
-              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
-              --notes "Custom Telegram iOS build with camera improvements."
-
+          # Если такой tag/release уже существует,
+          # workflow не будет молча перезаписывать его.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "ERROR: Release $TAG already exists."
+            exit 1
           fi
+
+          RELEASE_ARGS=(
+            "$TAG"
+            "$OUTPUT_PATH/Telegram.ipa"
+            --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})"
+            --notes "Custom Telegram iOS build with camera improvements."
+          )
+
+          if [ "$DSYM_CREATED" = "true" ]; then
+            RELEASE_ARGS+=(
+              "$OUTPUT_PATH/Telegram.DSYMs.zip"
+            )
+          fi
+
+          gh release create "${RELEASE_ARGS[@]}"
+
+      # ==========================================
+      # RESULT
+      # ==========================================
 
       - name: Show result
         run: |
           echo ""
-          echo "========================================"
+          echo "=========================================="
           echo "       BUILD COMPLETED SUCCESSFULLY"
-          echo "========================================"
+          echo "=========================================="
+          echo ""
           echo "Telegram version: $APP_VERSION"
           echo "Build number:     $BUILD_NUMBER"
+          echo ""
+          echo "Release:"
+          echo "https://github.com/${{ github.repository }}/releases/tag/build-${BUILD_NUMBER}"
           echo ""
           echo "Artifacts:"
           ls -lh /Users/Shared/telegram-ios/build/artifacts/
