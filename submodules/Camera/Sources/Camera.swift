@@ -98,14 +98,14 @@ final class CameraDeviceContext {
     }
     
     private func preferredMaxFrameRate(useLower: Bool) -> Double {
-        if !self.exclusive || self.isRoundVideo || useLower {
-            return 30.0
+        if !self.exclusive || self.isRoundVideo || if useLower {
+            return 60.0
         }
         switch DeviceModel.current {
         case .iPhone15ProMax, .iPhone14ProMax, .iPhone13ProMax, .iPhone16ProMax, .iPhone17Pro, .iPhone17ProMax:
-            return 30.0
+            return 60.0
         default:
-            return 30.0
+            return 60.0
         }
     }
 }
