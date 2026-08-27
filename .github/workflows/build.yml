@@ -2,56 +2,69 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
 
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: macos-15
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: false
-          fetch-depth: '0'
 
       - name: Fix submodule URLs
         run: |
+          set -e
+
           git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
           git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+
           git submodule sync
           git submodule update --init --recursive
 
       - name: Set active Xcode path
         run: |
-          XCODE_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["xcode"]);')
-          sudo xcode-select -s /Applications/Xcode_$XCODE_VERSION.app/Contents/Developer
+          set -e
+
+          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
+
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+
+          xcodebuild -version
 
       - name: Create canonical source directory
         run: |
-          set -x
+          set -e
+
           sudo mkdir -p /Users/Shared
-          cp -R "$GITHUB_WORKSPACE" /Users/Shared/
-          mv /Users/Shared/$(basename "$GITHUB_WORKSPACE") /Users/Shared/telegram-ios
+          sudo rm -rf /Users/Shared/telegram-ios
+          sudo cp -R "$GITHUB_WORKSPACE" /Users/Shared/telegram-ios
 
       - name: Build the App
         run: |
+          set -e
           set -x
 
-          SOURCE_DIR=/Users/Shared/telegram-ios
+          SOURCE_DIR="/Users/Shared/telegram-ios"
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
 
           cd "$SOURCE_DIR"
 
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
 
-          export APP_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["app"]);')
-          export COMMIT_COUNT=$(git rev-list --count HEAD)
-          export COMMIT_COUNT="$(($COMMIT_COUNT+$BUILD_NUMBER_OFFSET))"
-          export BUILD_NUMBER="$COMMIT_COUNT"
+          APP_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')"
+
+          COMMIT_COUNT="$(git rev-list --count HEAD)"
+          BUILD_NUMBER="$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))"
 
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
@@ -67,60 +80,98 @@ jobs:
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
-          # collect ipa
+          # ==============================
+          # Check IPA
+          # ==============================
+
+          if [ ! -f "bazel-bin/Telegram/Telegram.ipa" ]; then
+            echo "ERROR: Telegram.ipa was not created."
+            exit 1
+          fi
+
+          # ==============================
+          # Collect IPA
+          # ==============================
+
           OUTPUT_PATH="build/artifacts"
+
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
 
-          cp bazel-bin/Telegram/Telegram.ipa "$OUTPUT_PATH/Telegram.ipa"
+          cp \
+            "bazel-bin/Telegram/Telegram.ipa" \
+            "$OUTPUT_PATH/Telegram.ipa"
 
-          # collect dSYM
+          # ==============================
+          # Collect dSYMs
+          # ==============================
+
+          rm -rf build/DSYMs
           mkdir -p build/DSYMs
 
-          find bazel-bin/Telegram \
+          find "bazel-bin/Telegram" \
             -type d \
             -name "*.dSYM" \
             -exec cp -R {} build/DSYMs/ \;
 
-          if find build/DSYMs -type d -name "*.dSYM" -print -quit | grep -q .; then
-            zip -r "./$OUTPUT_PATH/Telegram.DSYMs.zip" build/DSYMs 1>/dev/null
-            echo "dSYM archive created"
+          DSYM_COUNT=$(find build/DSYMs -type d -name "*.dSYM" | wc -l | tr -d ' ')
+
+          if [ "$DSYM_COUNT" -gt 0 ]; then
+            echo "Found $DSYM_COUNT dSYM bundle(s)."
+
+            zip -r \
+              "$OUTPUT_PATH/Telegram.DSYMs.zip" \
+              build/DSYMs
+
+            echo "DSYM_CREATED=true" >> "$GITHUB_ENV"
           else
-            echo "No dSYM files found, skipping dSYM archive"
+            echo "No dSYM files found."
+            echo "DSYM_CREATED=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: build-${{ env.BUILD_NUMBER }}
-          release_name: Telegram ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
-          body: |
-            An unsigned build of Telegram for iOS ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
-          draft: false
-          prerelease: false
+          # ==============================
+          # Verify artifacts
+          # ==============================
 
-      - name: Upload Release IPA
-        id: upload-release-ipa
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
-          asset_name: Telegram.ipa
-          asset_content_type: application/zip
+          echo "================================"
+          echo "BUILD ARTIFACTS"
+          echo "================================"
 
-      - name: Upload Release DSYM
-        id: upload-release-dsym
-        if: hashFiles('/Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip') != ''
-        uses: actions/upload-release-asset@v1
+          ls -lh "$OUTPUT_PATH"
+
+      - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: /Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip
-          asset_name: Telegram.DSYMs.zip
-          asset_content_type: application/zip
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          if [ "$DSYM_CREATED" = "true" ]; then
+
+            gh release create \
+              "build-${BUILD_NUMBER}" \
+              "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa" \
+              "/Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip" \
+              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
+              --notes "Custom Telegram iOS build with camera improvements."
+
+          else
+
+            gh release create \
+              "build-${BUILD_NUMBER}" \
+              "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa" \
+              --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
+              --notes "Custom Telegram iOS build with camera improvements."
+
+          fi
+
+      - name: Show result
+        run: |
+          echo ""
+          echo "========================================"
+          echo "       BUILD COMPLETED SUCCESSFULLY"
+          echo "========================================"
+          echo "Telegram version: $APP_VERSION"
+          echo "Build number:     $BUILD_NUMBER"
+          echo ""
+          echo "Artifacts:"
+          ls -lh /Users/Shared/telegram-ios/build/artifacts/
