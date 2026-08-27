@@ -1,4 +1,3 @@
-```yaml
 name: CI
 
 on:
@@ -39,21 +38,17 @@ jobs:
           set -e
 
           XCODE_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')"
+          XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
 
           echo "Required Xcode: $XCODE_VERSION"
 
-          XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
-
           if [ ! -d "$XCODE_PATH" ]; then
-            echo "ERROR: Xcode $XCODE_VERSION is not installed on this runner."
-            echo "Available Xcode installations:"
+            echo "ERROR: Xcode $XCODE_VERSION is not installed."
             ls -d /Applications/Xcode*.app 2>/dev/null || true
             exit 1
           fi
 
           sudo xcode-select -s "$XCODE_PATH"
-
-          echo "Active Xcode:"
           xcodebuild -version
 
       - name: Create canonical source directory
@@ -74,7 +69,6 @@ jobs:
           echo "Current user:"
           whoami
 
-          echo "Write test:"
           TEST_FILE="$SOURCE_DIR/.github_actions_write_test"
           touch "$TEST_FILE"
           rm -f "$TEST_FILE"
@@ -156,25 +150,24 @@ jobs:
             -print \
             -exec cp -R {} "$SOURCE_DIR/build/DSYMs/" \;
 
-          DSYM_COUNT="$(
-            find "$SOURCE_DIR/build/DSYMs" \
-              -type d \
-              -name "*.dSYM" \
-              | wc -l \
-              | tr -d ' '
-          )"
+          if find "$SOURCE_DIR/build/DSYMs" \
+            -type d \
+            -name "*.dSYM" \
+            -print -quit | grep -q .; then
 
-          echo "Found dSYM bundles: $DSYM_COUNT"
+            echo "dSYM bundles found."
 
-          if [ "$DSYM_COUNT" -gt 0 ]; then
             zip -r \
               "$OUTPUT_PATH/Telegram.DSYMs.zip" \
               "$SOURCE_DIR/build/DSYMs"
 
             echo "DSYM_CREATED=true" >> "$GITHUB_ENV"
+
           else
+
             echo "No dSYM bundles found."
             echo "DSYM_CREATED=false" >> "$GITHUB_ENV"
+
           fi
 
           echo ""
@@ -210,30 +203,33 @@ jobs:
           fi
 
           if [ "$DSYM_CREATED" = "true" ]; then
+
             gh release create \
               "$TAG" \
               "$OUTPUT_PATH/Telegram.ipa" \
               "$OUTPUT_PATH/Telegram.DSYMs.zip" \
               --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
               --notes "Custom Telegram iOS build with camera improvements."
+
           else
+
             gh release create \
               "$TAG" \
               "$OUTPUT_PATH/Telegram.ipa" \
               --title "Telegram ${APP_VERSION} (${BUILD_NUMBER})" \
               --notes "Custom Telegram iOS build with camera improvements."
+
           fi
 
       - name: Show result
         run: |
           echo ""
           echo "=========================================="
-          echo "       BUILD COMPLETED SUCCESSFULLY"
+          echo "BUILD COMPLETED SUCCESSFULLY"
           echo "=========================================="
           echo ""
           echo "Telegram version: $APP_VERSION"
-          echo "Build number:     $BUILD_NUMBER"
+          echo "Build number: $BUILD_NUMBER"
           echo ""
           echo "Artifacts:"
           ls -lh /Users/Shared/telegram-ios/build/artifacts/
-```
