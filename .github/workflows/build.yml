@@ -11,10 +11,7 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: false
+    
 
       - name: Fix submodule URLs
         run: |
@@ -22,7 +19,7 @@ jobs:
           git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
           git submodule sync
           git submodule update --init --recursive
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
           fetch-depth: '0'
@@ -82,7 +79,7 @@ jobs:
           done
           zip -r "./$OUTPUT_PATH/Telegram.DSYMs.zip" build/DSYMs 1>/dev/null
 
-      - name: Create Releaseь
+      - name: Create Release
         id: create_release
         uses: actions/create-release@v1
         env:
