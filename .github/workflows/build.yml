@@ -11,6 +11,17 @@ jobs:
     runs-on: macos-15
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fix submodule URLs
+        run: |
+          git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
+          git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+          git submodule sync
+          git submodule update --init --recursive
       - uses: actions/checkout@v2
         with:
           submodules: 'recursive'
