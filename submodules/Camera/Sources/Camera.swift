@@ -98,7 +98,7 @@ final class CameraDeviceContext {
     }
     
     private func preferredMaxFrameRate(useLower: Bool) -> Double {
-        if !self.exclusive || self.isRoundVideo || if useLower {
+        if !self.exclusive || self.isRoundVideo || useLower {
             return 60.0
         }
         switch DeviceModel.current {
